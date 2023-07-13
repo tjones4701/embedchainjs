@@ -6,9 +6,9 @@ import type { Input, LoaderResult } from '../models';
 import type { ChunkResult } from '../models/ChunkResult';
 
 class BaseChunker {
-  textSplitter: RecursiveCharacterTextSplitter;
+  textSplitter: RecursiveCharacterTextSplitter | undefined;
 
-  constructor(textSplitter: RecursiveCharacterTextSplitter) {
+  constructor(textSplitter?: RecursiveCharacterTextSplitter) {
     this.textSplitter = textSplitter;
   }
 
@@ -20,7 +20,8 @@ class BaseChunker {
     datas.forEach(async (data) => {
       const { content } = data;
       const { metaData } = data;
-      const chunks: string[] = await this.textSplitter.splitText(content);
+      const chunks: string[] =
+        (await this?.textSplitter?.splitText(content)) ?? [];
       chunks.forEach((chunk) => {
         const chunkId = createHash('sha256')
           .update(chunk + metaData.url)

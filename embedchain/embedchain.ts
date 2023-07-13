@@ -4,7 +4,6 @@ import type { QueryResponse } from 'chromadb/dist/main/types';
 import { Document } from 'langchain/document';
 import type { ChatCompletionRequestMessage } from 'openai';
 import { Configuration, OpenAIApi } from 'openai';
-
 import type { BaseChunker } from './chunkers';
 import { PdfFileChunker, QnaPairChunker, WebPageChunker } from './chunkers';
 import type { BaseLoader } from './loaders';
@@ -15,6 +14,7 @@ import type {
   FormattedResult,
   Input,
   LocalInput,
+  Metadata,
   RemoteInput,
 } from './models';
 import { ChromaDB } from './vectordb';
@@ -25,17 +25,51 @@ const configuration = new Configuration({
 });
 const openai = new OpenAIApi(configuration);
 
-class EmbedChain {
+export type EmbedChainOptions = {
+  db?: BaseVectorDB;
+  storeName?: string;
+  dataTypes: Record<
+    string,
+    {
+      loader: typeof BaseLoader;
+      chunker: typeof BaseChunker;
+    }
+  >;
+};
+
+class EmbedChain<CustomDataTypes extends string> {
   dbClient: any;
+
+  storeName: string;
+
+  loaders: Record<string, typeof BaseLoader> = {};
+
+  chunkers: Record<string, typeof BaseChunker> = {};
 
   // TODO: Definitely assign
   collection!: Collection;
 
-  userAsks: [DataType, Input][] = [];
+  userAsks: [CustomDataTypes, Input][] = [];
 
   initApp: Promise<void>;
 
-  constructor(db: BaseVectorDB | null = null) {
+  constructor(options?: EmbedChainOptions) {
+    this.storeName = options?.storeName ?? 'embedchain_store';
+    if (options?.dataTypes != null) {
+      for (const i in options.dataTypes) {
+        const dataType = options.dataTypes[i];
+        this.addContentType(i, dataType.loader, dataType.chunker);
+      }
+    }
+    this.loaders.pdf_file = PdfFileLoader;
+    this.loaders.web_page = WebPageLoader;
+    this.loaders.qna_pair = LocalQnaPairLoader;
+
+    this.chunkers.pdf_file = PdfFileChunker;
+    this.chunkers.web_page = WebPageChunker;
+    this.chunkers.qna_pair = QnaPairChunker;
+
+    const db = options?.db;
     if (!db) {
       this.initApp = this.setupChroma();
     } else {
@@ -44,7 +78,7 @@ class EmbedChain {
   }
 
   async setupChroma(): Promise<void> {
-    const db = new ChromaDB();
+    const db = new ChromaDB(this.storeName);
     await db.initDb;
     this.dbClient = db.client;
     if (db.collection) {
@@ -63,34 +97,65 @@ class EmbedChain {
     this.userAsks = [];
   }
 
-  static getLoader(dataType: DataType) {
-    const loaders: { [t in DataType]: BaseLoader } = {
-      pdf_file: new PdfFileLoader(),
-      web_page: new WebPageLoader(),
-      qna_pair: new LocalQnaPairLoader(),
-    };
-    return loaders[dataType];
+  setLoader<B extends typeof BaseLoader>(dataType: string, baseLoader: B) {
+    this.loaders[dataType] = baseLoader;
   }
 
-  static getChunker(dataType: DataType) {
-    const chunkers: { [t in DataType]: BaseChunker } = {
-      pdf_file: new PdfFileChunker(),
-      web_page: new WebPageChunker(),
-      qna_pair: new QnaPairChunker(),
-    };
-    return chunkers[dataType];
+  setChunker<C extends typeof BaseChunker>(dataType: string, chunkLoader: C) {
+    this.chunkers[dataType] = chunkLoader;
   }
 
-  public async add(dataType: DataType, url: RemoteInput) {
-    const loader = EmbedChain.getLoader(dataType);
-    const chunker = EmbedChain.getChunker(dataType);
-    this.userAsks.push([dataType, url]);
-    await this.loadAndEmbed(loader, chunker, url);
+  addContentType<B extends typeof BaseLoader, C extends typeof BaseChunker>(
+    dataType: string,
+    baseLoader: B,
+    chunkLoader: C
+  ) {
+    this.setLoader(dataType, baseLoader);
+    this.setChunker(dataType, chunkLoader);
   }
 
-  public async addLocal(dataType: DataType, content: LocalInput) {
-    const loader = EmbedChain.getLoader(dataType);
-    const chunker = EmbedChain.getChunker(dataType);
+  getLoader(dataType: CustomDataTypes): BaseLoader {
+    const Cls = this.loaders[dataType];
+    if (Cls != null) {
+      return new Cls();
+    }
+    throw new Error(`No valid loader for ${dataType}`);
+  }
+
+  getChunker(dataType: CustomDataTypes) {
+    const Cls = this.chunkers[dataType];
+    if (Cls != null) {
+      return new Cls();
+    }
+
+    throw new Error(`No valid loader for ${dataType}`);
+  }
+
+  public async add(dataType: CustomDataTypes | {dataType: CustomDataTypes, data: Input}, url?: RemoteInput | Metadata) {
+    let dType: CustomDataTypes;
+    let content:Input;
+    
+    // Check if the datatype variable is an object
+    if (typeof dataType === 'object') {
+      dType = dataType.dataType;
+      content = dataType.data;
+    } else {
+      if (url == null) {
+        throw new Error("Url must be specified for remote data");
+      }
+      content = url;
+      dType = dataType;
+    }
+    
+    const loader = this.getLoader(dType);
+    const chunker = this.getChunker(dType);
+    this.userAsks.push([dType, content]);
+    await this.loadAndEmbed(loader, chunker, content);
+  }
+
+  public async addLocal(dataType: CustomDataTypes, content: LocalInput) {
+    const loader = this.getLoader(dataType);
+    const chunker = this.getChunker(dataType);
     this.userAsks.push([dataType, content]);
     await this.loadAndEmbed(loader, chunker, content);
   }
@@ -189,11 +254,11 @@ class EmbedChain {
   }
 }
 
-class EmbedChainApp extends EmbedChain {
+class EmbedChainApp extends EmbedChain<DataType> {
   // The EmbedChain app.
   // Has two functions: add and query.
   // adds(dataType, url): adds the data from the given URL to the vector db.
   // query(query): finds answer to the given query using vector database and LLM.
 }
-
+export { EmbedChain }
 export { EmbedChainApp };
